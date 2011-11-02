@@ -273,13 +273,13 @@ class mbus_utils {
             {
                 // VIFE = E100 nnnn 10^(nnnn-9) V
                 $n = ($vib_nvife & 0x0F);
-                return "%s V". mbus_utils::unit_prefix($n-9);
+                return "10^(". mbus_utils::unit_prefix($n-9) . ") V";
             }
             else if (($vib_nvife & 0x70) == 0x50)
             {
                 // VIFE = E101 nnnn 10nnnn-12 A
                 $n = ($vib_nvife & 0x0F);
-                return "%s A". mbus_utils::unit_prefix($n-12);
+                return "10^(". mbus_utils::unit_prefix($n-12) . ") A";
             }
             else if (($vib_nvife & 0xF0) == 0x70)
             {
@@ -361,31 +361,31 @@ class mbus_utils {
             // E100 1nnn Volume Flow ext. 10(nnn-9) m3/s 0.001ml/s to 10000ml/
             case ($vifNoExt >= 0x48 && $vifNoExt <= 0x4F):
                 $n = ($vif & 0x07);
-                return "Volume flow (%s m^3/s)". mbus_utils::unit_prefix($n-9);
+                return "Volume flow (". mbus_utils::unit_prefix($n-9) . "m^3/s)";
                 break;
 
-            // E101 0nnn Mass flow 10(nnn-3) kg/h 0.001kg/h to 10000kg/
+            // E101 0nnn Mass flow 10(nnn-3) kg/h 0.001kg/h to 10000kg/h
             case ($vifNoExt >= 0x50 && $vifNoExt <= 0x57):
                 $n = ($vif & 0x07);
-                return "Mass flow (" . mbus_utils::unit_prefix($n-3) . " kg/h)";
+                return "Mass flow (" . mbus_utils::unit_prefix($n-3) . ") kg/h 0.001kg/h to 10000kg/h";
                 break;
 
             // E101 10nn Flow Temperature 10(nn-3) °C 0.001°C to 1°C
             case ($vifNoExt >= 0x58 && $vifNoExt <= 0x5B):
                 $n = ($vif & 0x03);
-                return "Flow temperature (" . mbus_utils::unit_prefix($n-3) . "deg C)";
+                return "Flow temperature (" . mbus_utils::unit_prefix($n-3) . ") °C 0.001°C to 1°C";
                 break;
 
             // E101 11nn Return Temperature 10(nn-3) °C 0.001°C to 1°C
             case ($vifNoExt >= 0x5C && $vifNoExt <= 0x5F):
                 $n = ($vif & 0x03);
-                return "Return temperature (" . mbus_utils::unit_prefix($n-3) . "deg C)";
+                return "Return temperature (" . mbus_utils::unit_prefix($n-3) . ") °C 0.001°C to 1°C";
                 break;
 
             // E110 10nn Pressure 10(nn-3) bar 1mbar to 1000mbar
             case ($vifNoExt >= 0x68 && $vifNoExt <= 0x6B):
                 $n = ($vif & 0x03);
-                return "Pressure (" . mbus_utils::unit_prefix($n-3) . " bar)";
+                return "Pressure 10(" . mbus_utils::unit_prefix($n-3) . ") bar 1mbar to 1000mbar";
                 break;
 
             // E010 00nn On Time
@@ -627,8 +627,38 @@ class mbus_utils {
     // Source: MBDOC48.PDF
     //
     //------------------------------------------------------------------------------
-    public static function getValue($dif, $data, $data_length)
-    {
+    public static function getValue($dif, $vif, $data) {
+
+        if ( $vif != 0x00 ) {
+            $vifNoExt = $vif & 0x7F;
+            switch ($vifNoExt) // ignore the extension bit in this selection
+            {
+                // E110 110n Time Point
+                // n = 0        date
+                // n = 1 time & date
+                // data type G
+                // data type F
+                case ($vifNoExt >= 0x6C && $vifNoExt <= 0x6D):
+                    if ($vif & 0x1) {
+                        // Data length should be 4 bytes.
+                        if ( count($data) < 4 ) {
+                            return "Invalid number of bytes to determine date and time!";
+                        }
+                        return mbus_utils::data_date_time_decode($data);
+                    } else {
+                        return "NYI - Time Point (date)";
+                    }
+                    break;
+                // This is the units of the value. Not the actual value! Still need to get value in this record.
+                // Tricky eh, see 6.3 plain text VIF
+                case ($vifNoExt == 0x7C):
+                    if($data_length <= 0xBF) {
+                        return mbus_utils::data_str_decode($data);
+                    }
+                    break;
+            }
+        }
+
         switch ($dif & 0x0F)
         {
             case 0x00: // no data
@@ -669,6 +699,18 @@ class mbus_utils {
 
         return "";
     }
+
+    /**
+     * Decode Date Time data
+     */
+    public static function data_date_time_decode($data) {
+        $minute = $data[0] & 0x3F;
+        $hour = $data[1] & 0x1F;
+        $day = $data[2] & 0x1F;
+        $month = $data[3] & 0x0F;
+        $year = bindec(decbin(($data[3] & 0xF0) >> 3) . " " . decbin(($data[2] & 0xE0) >> 5));
+        return date("r", mktime($hour, $minute, 0, $month, $day, $year));
+    }
     /**
      * Decode Integer data
      */
@@ -682,6 +724,7 @@ class mbus_utils {
         }
 
         return $val;
+
     }
     /**
      * Decode BCD data
@@ -707,10 +750,22 @@ class mbus_utils {
             $s .= chr($data[$i]);
         }
         //mbus_utils::mylog("Decode string: " . $s);
-        return $s;
+        return trim($s);
     }
 
-
+    /**
+     * Returns a hex converted byte in the format 0xNN.
+     * Remember that PHP always stores values as decimal.
+     */
+    public static function ByteToHex($byte) {
+        $retval = "0x";
+        if ( $byte < 0x0F ) {
+            $retval .= "0" . strtoupper(dechex($byte));
+        } else {
+            $retval .= strtoupper(dechex($byte));
+        }
+        return $retval . " ";
+    }
 
 
 }

@@ -14,7 +14,7 @@ mbus_utils::logToTerminal(); // View Browser in Source mode to get nice formatti
 /**
  * Set to true for testing, it will not bother connecting, it will just read a hard coded string of byte data.
  */
-$testmode = true;
+$testmode = false;
 
 $mbusClient = new mbus_client();
 $mbusClient->run($testmode);

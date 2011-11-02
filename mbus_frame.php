@@ -579,6 +579,8 @@ class mbus_frame {
 
     /*
         6.3.2 Variable Data Blocks
+        In the code watch for special cases such as where the VIF = 7C indicating units in the data (not just value).
+        These are explained in the spec, but are not very obvious!
 
         First DIF   [19]    \x0c
         \x78\x86\x78\x01\x10\x0d\x7c\x08\x44
@@ -630,17 +632,27 @@ class mbus_frame {
 
         while ($i < $this->dataarray_len - 2) {
 
+            $record_num++;
+
             $this->varrecords[$record_num]["general"]["StartBytePosition"] = $i;
 
             $dif = $this->dataarray[$i];
             $record_data_len = $dif & 0x07;
 
-            $this->varrecords[$record_num]["dif"]["Data"] = dechex($dif);
+            $this->varrecords[$record_num]["dif"]["Data"] = mbus_utils::ByteToHex($dif);
             $this->varrecords[$record_num]["dif"]["DataLength"] = $record_data_len;
-            $this->varrecords[$record_num]["dif"]["DataType"] = mbus_utils::getDataFieldType($dif);
-            $this->varrecords[$record_num]["dif"]["ExtensionBitSet"] = ($dife & 0x80) ? "Yes" : "No";
-            $this->varrecords[$record_num]["dif"]["StorageNumLSB"] = ($dife & 0x40);
 
+            if ( $record_data_len == 0 ) {
+                //mbus_utils::mylog("0x20 indicates no data, skip reading VIF.");
+                $i++;
+                unset($this->varrecords[$record_num]); // Clear any data from the record.
+                $record_num--;
+                continue;
+            }
+
+            $this->varrecords[$record_num]["dif"]["DataTypeOrLength"] = mbus_utils::getDataFieldType($dif);
+            $this->varrecords[$record_num]["dif"]["ExtensionBitSet"] = ($dif & 0x80) == 0x80 ? "Yes" : "No";
+            $this->varrecords[$record_num]["dif"]["StorageNumLSB"] = ($dif & 0x40);
 
             /**
              * The manufacturer data header (MDH) is made up by the character 0Fh or 1Fh and indicates the beginning of the manufacturer
@@ -675,11 +687,11 @@ class mbus_frame {
                 $i++; // Increment byte pointer.
                 $dife = $this->dataarray[$i];
 
-                $this->varrecords[$record_num]["dife"][$dife_count]["Data"] = dechex($dife);
-                $this->varrecords[$record_num]["dife"][$dife_count]["ExtensionBitSet"] = ($dife & 0x80) ? "Yes" : "No";
+                $this->varrecords[$record_num]["dife"][$dife_count]["Data"] = mbus_utils::ByteToHex($dife);
+                $this->varrecords[$record_num]["dife"][$dife_count]["ExtensionBitSet"] = ($dife & 0x80) == 0x80 ? "Yes" : "No";
                 $this->varrecords[$record_num]["dife"][$dife_count]["Unit"] = ($dife & 0x40);
                 $this->varrecords[$record_num]["dife"][$dife_count]["Tariff"] = ($dife & 0x30);
-                $this->varrecords[$record_num]["dife"][$dife_count]["storage_num_msb"] = dechex(($dife & 0x0F));
+                $this->varrecords[$record_num]["dife"][$dife_count]["storage_num_msb"] = mbus_utils::ByteToHex(($dife & 0x0F));
                 $dife_count++;
             }
 
@@ -687,16 +699,16 @@ class mbus_frame {
 
             // VIF (Value Information Block)
             $vif = $this->dataarray[$i];
-            $this->varrecords[$record_num]['vif']['Data'] = dechex($vif);
-            $this->varrecords[$record_num]["vif"]["ExtensionBitSet"] = ($vif & 0x80) ? "Yes" : "No";
-            $this->varrecords[$record_num]["vif"]["UnitAndMultiplier"] = dechex(($vif & 0x7F));
+            $this->varrecords[$record_num]['vif']['Data'] = mbus_utils::ByteToHex($vif);
+            $this->varrecords[$record_num]["vif"]["ExtensionBitSet"] = ($vif & 0x80) == 0x80 ? "Yes" : "No";
+            $this->varrecords[$record_num]["vif"]["UnitAndMultiplier"] = mbus_utils::ByteToHex($vif & 0x7F);
 
             // VIFE
             //mbus_utils::mylog("VIF extension value [" . dechex(($this->dataarray[$i]) & 0x80) . "]");
             $vife_count = 1;
             while (($this->dataarray[$i] & 0x80) == 0x80) {
-                mbus_utils::mylog("Found VIF extension " . $i);
-                $this->varrecords[$record_num]['vife'][$vife_count]['data'] = dechex($this->dataarray[$i+1]);
+                //mbus_utils::mylog("Found VIF extension " . $i);
+                $this->varrecords[$record_num]['vife'][$vife_count]['data'] = mbus_utils::ByteToHex($this->dataarray[$i+1]);
                 $vife_count++;
                 $i++; // Increment byte pointer.
             }
@@ -709,7 +721,12 @@ class mbus_frame {
                 // mbus_utils::mylog("Calculate data length from the first byte of actual data.");
                 if($this->dataarray[$i] <= 0xBF) {
                     $record_data_len = $this->dataarray[$i++];
+                    // Note that 0x0A is a newline ascii character and it seems to be after the characters but not included in the length!
                     $this->varrecords[$record_num]["dif"]["data_type"] = 'Variable ASCII String';
+                    if ($this->dataarray[$i + $record_data_len] == 0x0A) {
+                        //mbus_utils::mylog("Found new line at end of string that is not included in the length. Adding 1 to length.");
+                        $record_data_len += 1;
+                    }
                 } else if($this->dataarray[$i] >= 0xC0 && $this->dataarray[$i] <= 0xCF) {
                     $record_data_len = ($this->dataarray[$i++] - 0xC0) * 2;
                     $this->varrecords[$record_num]["dif"]["data_type"] = 'Variable Postive BCD';
@@ -725,23 +742,54 @@ class mbus_frame {
                 }
             }
 
-            $this->varrecords[$record_num]["dif"]["DataLength"] = $record_data_len;
-
             //mbus_utils::mylog("Copy [" . $record_data_len . "] bytes of data.");
+
+            $this->varrecords[$record_num]['dif']['Function'] = mbus_utils::getFunctionField(($dif & 0x30) >> 4);
+            $this->varrecords[$record_num]['vif']['Unit'] = mbus_utils::vif_unit_lookup($vif);
+            if ( $this->varrecords[$record_num]['vif']['Unit'] == 'Plain Text' &&
+                 $this->varrecords[$record_num]["dif"]["data_type"] != 'Variable ASCII String') {
+                // First byte of data is length.
+                $record_data_len = $this->dataarray[$i++];
+
+                // Get the value for the VIF data type.
+                $this->varrecords[$record_num]["vif"]["DataLength"] = $record_data_len;
+                for ($j = 0; $j < $record_data_len; $j++) {
+                    $this->varrecords[$record_num]["data"][] = $this->dataarray[$i];
+                    $i++;
+                }
+
+                // Replace "Plain Text" with unit from data.
+                $this->varrecords[$record_num]['vif']['Unit'] = mbus_utils::getValue($dif, $vif, $this->varrecords[$record_num]["data"]);
+
+                // Set the actual value data length to the dif record.
+                $record_data_len = $this->varrecords[$record_num]["dif"]["DataLength"];
+                // Set $vif to nothing so it doesn't think the next bit of data is plain text.
+                $vif = 0x00;
+                // Clear data out.
+                unset($this->varrecords[$record_num]["data"]);
+            }
+
+
+            // Must be after parsing DIF and VIF as both of these can determine length.
+            $this->varrecords[$record_num]["dif"]["DataLength"] = $record_data_len;
+            //mbus_utils::mylog("Record [" . $record_num . "] Length [" . $record_data_len . "]");
 
             for ($j = 0; $j < $record_data_len; $j++) {
                 $this->varrecords[$record_num]["data"][] = $this->dataarray[$i];
                 $i++;
             }
 
-            $this->varrecords[$record_num]["dif_data_rec_len"] = $record_data_len;
-
-            $this->varrecords[$record_num]['dif']['Function'] = mbus_utils::getFunctionField(($dif & 0x30) >> 4);
-            $this->varrecords[$record_num]['vif']['Unit'] = mbus_utils::vif_unit_lookup($vif);
-            $this->varrecords[$record_num]['Value'] = mbus_utils::getValue($dif, $this->varrecords[$record_num]["data"], $record_data_len);
+            $this->varrecords[$record_num]['Value'] = mbus_utils::getValue($dif, $vif, $this->varrecords[$record_num]["data"]);
 
             $this->varrecords[$record_num]["general"]["EndBytePosition"] = $i-1;
-            $record_num++;
+
+            $sbp = $this->varrecords[$record_num]['general']['StartBytePosition'];
+            $ebp = $this->varrecords[$record_num]['general']['EndBytePosition'];
+
+            if ( $sbp < $ebp )
+            for ($i = $sbp; $i <= $ebp; $i++) {
+                $this->varrecords[$record_num]['general']['DataInclHeader'] .= mbus_utils::ByteToHex($this->dataarray[$i]);
+            }
 
         }
 
@@ -785,15 +833,17 @@ class mbus_frame {
             mbus_utils::mylog("--------------------------------------------------------");
             mbus_utils::mylog(str_pad("Record Number ", 30) . $key1);
 
+
+            mbus_utils::mylog("General");
             $difgeneralarray = $record['general'];
             foreach ($difgeneralarray as $dif_general_key => $dif_general_value) {
                 mbus_utils::mylog(str_pad(" $dif_general_key ", 30) . $dif_general_value);
             }
 
-            $sbp = $record['general']['StartBytePosition'];
-            mbus_utils::mylog(str_pad(" StartByte ", 30) . dechex($this->dataarray[$sbp]));
-            $ebp = $record['general']['EndBytePosition'];
-            mbus_utils::mylog(str_pad(" EndByte ", 30) . dechex($this->dataarray[$ebp]));
+            //$sbp = $record['general']['StartBytePosition'];
+            //mbus_utils::mylog(str_pad(" StartByte ", 30) . dechex($this->dataarray[$sbp]));
+            //$ebp = $record['general']['EndBytePosition'];
+            //mbus_utils::mylog(str_pad(" EndByte ", 30) . dechex($this->dataarray[$ebp]));
 
 
             mbus_utils::mylog("DIF found");
@@ -848,9 +898,9 @@ class mbus_frame {
             if ( isset($dataarray) ) {
                 $data = "";
                 foreach ($dataarray as $data_key => $data_value) {
-                    $data .= "[" . dechex($data_value) . "]";
+                    $data .= mbus_utils::ByteToHex($data_value);
                 }
-                mbus_utils::mylog(str_pad(" Raw Bytes ", 30) . strtoupper($data));
+                mbus_utils::mylog(str_pad(" Raw Bytes ", 30) . $data);
             } else {
                 mbus_utils::mylog(str_pad(" Raw Bytes ", 30) . "No data");
             }
